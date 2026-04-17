@@ -34,6 +34,97 @@ from transformers.modeling_outputs import BaseModelOutputWithPast
 from vllm import LLM, SamplingParams
 
 from minference import MInference
+from minference.modules import minference_forward as minference_forward_module
+from minference.ops import pit_sparse_flash_attention_v2 as pit_sparse_module
+
+
+def maybe_patch_vertical_slash_to_sgl_v4():
+    """
+    Optionally replace MInference vertical+slash attention with sgl-kernel v4 path.
+    Enable via env:
+      MINFERENCE_VS_KERNEL=v4
+    """
+    if os.environ.get("MINFERENCE_VS_KERNEL", "").lower() != "v4":
+        return
+
+    from sgl_kernel.sparse_flash_attn import (
+        convert_vertical_slash_indexes_sparse,
+        sparse_attn_func_v4,
+    )
+
+    def vertical_slash_sparse_attention_v4(
+        query: Tensor,  # [B, H, S, D]
+        key: Tensor,    # [B, H, S, D]
+        value: Tensor,  # [B, H, S, D]
+        v_idx: Tensor,  # [B, H, NNZ_V]
+        s_idx: Tensor,  # [B, H, NNZ_S]
+        block_size_M: int = 64,
+        block_size_N: int = 64,
+    ):
+        batch_size, num_heads, context_size, _ = query.shape
+        seqlens = torch.full(
+            (batch_size,), context_size, dtype=torch.int32, device=query.device
+        )
+        v_idx = (
+            v_idx.to(torch.int32)
+            .reshape(batch_size, num_heads, -1)
+            .sort(dim=-1, descending=False)
+            .values
+        )
+        s_idx = (
+            s_idx.to(torch.int32)
+            .reshape(batch_size, num_heads, -1)
+            .sort(dim=-1, descending=True)
+            .values
+        )
+
+        q_bshd = query.transpose(1, 2).contiguous()
+        k_bshd = key.transpose(1, 2).contiguous()
+        v_bshd = value.transpose(1, 2).contiguous()
+
+        (
+            block_count,
+            block_offset,
+            sparse_block_count,
+            sparse_block_offset,
+            column_count,
+            column_index,
+        ) = convert_vertical_slash_indexes_sparse(
+            seqlens,
+            seqlens,
+            v_idx,
+            s_idx,
+            context_size,
+            block_size_M,
+            block_size_N,
+            causal=True,
+        )
+
+        out = sparse_attn_func_v4(
+            q_bshd,
+            k_bshd,
+            v_bshd,
+            block_count,
+            block_offset,
+            sparse_block_count,
+            sparse_block_offset,
+            column_count,
+            column_index,
+            causal=True,
+            block_size_M=block_size_M,
+            block_size_N=block_size_N,
+            return_softmax_lse=False,
+        )
+        return out.transpose(1, 2).contiguous()
+
+    # Patch both module references used by MInference forward path.
+    minference_forward_module.vertical_slash_sparse_attention = (
+        vertical_slash_sparse_attention_v4
+    )
+    pit_sparse_module.vertical_slash_sparse_attention = (
+        vertical_slash_sparse_attention_v4
+    )
+    print("[Info] Patched vertical_slash_sparse_attention -> sgl-kernel v4")
 
 
 # sampling_params = SamplingParams(temperature=0.8, top_p=0.95)
@@ -123,6 +214,8 @@ def load_model(
     kv_cache_cpu_device: str = "cpu",
     tensor_parallel_size: int = 1,
 ):
+    maybe_patch_vertical_slash_to_sgl_v4()
+
     tok = AutoTokenizer.from_pretrained(
         model_name, resume_download=None, trust_remote_code=trust_remote_code
     )
@@ -197,6 +290,10 @@ if __name__ == "__main__":
         data_names = data_name.split(",")
     else:
         data_names = [data_name]
+
+    print(f"Model: {model_name}")
+    print(f"Data: {data_names}")
+    print(f"Max seq length: {max_seq_length}")
 
     # Model
     model, tok = load_model(
