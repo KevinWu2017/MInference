@@ -44,6 +44,23 @@ LAST_Q_MASK = arange[None, None, :, None] >= arange[None, None, None, :]
 ROPE_TYPE = None
 SEARCH_MASK = None
 
+
+def _resolve_minference_prefill_backend(config):
+    if config is None:
+        return "auto"
+    return config.get("minference_prefill_backend", config.get("prefill_backend", "auto"))
+
+
+def _vertical_slash_attention(q, k, v, vertical_topk, slash, config=None):
+    return vertical_slash_sparse_attention(
+        q,
+        k,
+        v,
+        vertical_topk,
+        slash,
+        backend=_resolve_minference_prefill_backend(config),
+    )
+
 def set_rope_type(self):
     global ROPE_TYPE
     if ROPE_TYPE is not None:
@@ -244,7 +261,7 @@ def search_pattern_v2(q, k, v, head):
         slash_topk = slash
         slash = (q_len - 1) - torch.topk(slash, slash_size, -1).indices
 
-        return vertical_slash_sparse_attention(q, k, v, vertical_topk, slash)
+        return _vertical_slash_attention(q, k, v, vertical_topk, slash)
     def dense(q, k, v, vertical_size=None, slash_size=None):
         return flash_attn_func(q.transpose(1, 2), k.transpose(1, 2), v.transpose(1,2), 0.0, softmax_scale=None, causal=q_len != 1).view(bsz, 1, q_len, head_dim)
     def block_sparse_kernel(q, k, v, vertical_size=None, slash_size=None):
@@ -376,7 +393,7 @@ def gather_last_q_vertical_slash_topk_v4(self, q, k, v, head_id):
             slash = torch.cat([slash[-2048:], slash[-6144:-2048:2]], 0)[None, None, :]
 
         slash = (q_len - 1) - slash
-        return vertical_slash_sparse_attention(q, k, v, vertical_topk, slash)
+        return _vertical_slash_attention(q, k, v, vertical_topk, slash, getattr(self, "patch_config", None))
 
     def vertical_and_slash_kernel(q, k, v, vertical_size, slash_size):
         vertical_size, slash_size  = min(q_len, max(vertical_size, 30)), min(q_len, max(slash_size, 50))
@@ -393,7 +410,7 @@ def gather_last_q_vertical_slash_topk_v4(self, q, k, v, head_id):
         slash_topk = slash
         slash = (q_len - 1) - torch.topk(slash, slash_size, -1).indices
 
-        return vertical_slash_sparse_attention(q, k, v, vertical_topk, slash)
+        return _vertical_slash_attention(q, k, v, vertical_topk, slash, getattr(self, "patch_config", None))
 
     def vertical_and_slash_kernel_extend(q, k, v, vertical_size, slash_size):
         vertical_size, slash_size  = min(q_len, max(vertical_size + 100, 30)), min(q_len, max(slash_size, 50))
@@ -413,7 +430,7 @@ def gather_last_q_vertical_slash_topk_v4(self, q, k, v, head_id):
         slash_topk = slash
         slash = (q_len - 1) - torch.topk(slash, slash_size, -1).indices
 
-        return vertical_slash_sparse_attention(q, k, v, vertical_topk, slash)
+        return _vertical_slash_attention(q, k, v, vertical_topk, slash, getattr(self, "patch_config", None))
 
     def vertical_and_slash_kernel_static(q, k, v, vertical_size, slash_size):
         if "vs" in self.__dict__:
@@ -434,7 +451,7 @@ def gather_last_q_vertical_slash_topk_v4(self, q, k, v, head_id):
             slash = (q_len - 1) - torch.topk(slash, slash_size, -1).indices
             self.vs = vertical_topk, slash
 
-        return vertical_slash_sparse_attention(q, k, v, vertical_topk, slash)
+        return _vertical_slash_attention(q, k, v, vertical_topk, slash, getattr(self, "patch_config", None))
     def dense(q, k, v, vertical_size=None, slash_size=None):
         return flash_attn_func(q.transpose(1, 2), k.transpose(1, 2), v.transpose(1,2), 0.0, softmax_scale=None, causal=q_len != 1).view(bsz, 1, q_len, self.head_dim)
     def block_sparse_kernel(q, k, v, vertical_size=None, slash_size=None):
@@ -611,7 +628,7 @@ def minference_prefill_kernel(
         slash_topk = slash
         slash = (q_len - 1) - torch.topk(slash, slash_size, -1).indices
 
-        return vertical_slash_sparse_attention(q, k, v, vertical_topk, slash)
+        return _vertical_slash_attention(q, k, v, vertical_topk, slash, config)
 
     def block_sparse_kernel(q, k, v, vertical_size=None, slash_size=None):
         topk = 100
@@ -810,7 +827,7 @@ def gather_last_q_vertical_slash_topk_vllm(self, q, k, v, head_id):
         slash_topk = slash
         slash = (q_len - 1) - torch.topk(slash, slash_size, -1).indices
 
-        return vertical_slash_sparse_attention(q, k, v, vertical_topk, slash)
+        return _vertical_slash_attention(q, k, v, vertical_topk, slash, getattr(self, "patch_config", None))
 
     def block_sparse_kernel(q, k, v, vertical_size=None, slash_size=None):
         topk = 100

@@ -10,13 +10,22 @@ import triton.language as tl
 from ..cuda import convert_vertical_slash_indexes
 
 try:
-    from sgl_kernel.sparse_flash_attn import sparse_attn_func
+    from sgl_kernel.sparse_flash_attn import (
+        convert_vertical_slash_indexes_sparse,
+        sparse_attn_func,
+        sparse_attn_func_v5,
+    )
 except:
     try:
         from vllm_flash_attn import sparse_attn_func
+
+        convert_vertical_slash_indexes_sparse = None
+        sparse_attn_func_v5 = None
     except:
         print("To benefit from fast kernel implementations, we recommend installing SGLang or vllm.")
+        convert_vertical_slash_indexes_sparse = None
         sparse_attn_func = None
+        sparse_attn_func_v5 = None
 
 try:
     from sgl_kernel.sparse_flash_attn import (
@@ -200,8 +209,12 @@ def vertical_slash_sparse_attention(
     s_idx: torch.Tensor,  # [BATCH, N_HEADS, NNZ_S]
     block_size_M: int = 64,
     block_size_N: int = 64,
+    backend: str = "auto",
 ):
-    if convert_vertical_slash_indexes_opt is not None:
+    if backend not in {"auto", "cutlass", "triton", "v5"}:
+        raise ValueError(f"Unsupported backend: {backend}")
+
+    if backend == "auto" and convert_vertical_slash_indexes_opt is not None:
         return vertical_slash_sparse_attention_wo_pad(query, key, value, v_idx, s_idx)
     batch_size, num_heads, context_size, head_dim = query.shape
     pad = (block_size_M - context_size) & (block_size_M - 1)
@@ -219,11 +232,47 @@ def vertical_slash_sparse_attention(
     s_idx = s_idx.to(torch.int32).reshape((batch_size, num_heads, -1)).sort(dim=-1, descending=True)[0]
     seqlens = torch.tensor([context_size], dtype=torch.int32, device=query.device)
     sm_scale = head_dim ** -0.5
-    block_count, block_offset, column_count, column_index = convert_vertical_slash_indexes(
-        seqlens, v_idx, s_idx, context_size, block_size_M, block_size_N,
-    )
+    if backend == "v5":
+        if sparse_attn_func_v5 is None or convert_vertical_slash_indexes_sparse is None:
+            raise RuntimeError("backend=v5 requires sgl-kernel sparse_attn_func_v5 support")
+        (
+            block_count,
+            block_offset,
+            sparse_block_count,
+            sparse_block_offset,
+            column_count,
+            column_index,
+        ) = convert_vertical_slash_indexes_sparse(
+            seqlens,
+            seqlens,
+            v_idx,
+            s_idx,
+            context_size,
+            block_size_M,
+            block_size_N,
+            causal=True,
+        )
+        out = sparse_attn_func_v5(
+            query.transpose(1, 2).contiguous(),
+            key.transpose(1, 2).contiguous(),
+            value.transpose(1, 2).contiguous(),
+            block_count,
+            block_offset,
+            sparse_block_count,
+            sparse_block_offset,
+            column_count,
+            column_index,
+            return_softmax_lse=False,
+            causal=True,
+            block_size_M=block_size_M,
+            block_size_N=block_size_N,
+        ).transpose(1, 2).contiguous()
+    else:
+        block_count, block_offset, column_count, column_index = convert_vertical_slash_indexes(
+            seqlens, v_idx, s_idx, context_size, block_size_M, block_size_N,
+        )
 
-    if sparse_attn_func is not None:
+    if backend in {"auto", "cutlass"} and sparse_attn_func is not None and backend != "v5":
         out = sparse_attn_func(
             query.transpose(1, 2).contiguous(),
             key.transpose(1, 2).contiguous(),
@@ -232,7 +281,9 @@ def vertical_slash_sparse_attention(
             return_softmax_lse=False,
             causal=True,
         ).transpose(1, 2).contiguous()
-    else:
+    elif backend != "v5":
+        if backend == "cutlass":
+            raise RuntimeError("backend=cutlass requires sparse_attn_func to be available")
         out = _triton_mixed_sparse_attention(
             query, key, value, seqlens,
             block_count, block_offset, column_count, column_index,

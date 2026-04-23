@@ -42,19 +42,36 @@ def run_target_length(m: int, model, attn_type: str):
                 )
         torch.cuda.synchronize()
         s += time.time() - start
-    print(attn_type, m, s / T)
+    label = attn_type
+    if attn_type == "minference" and args.minference_prefill_backend != "auto":
+        label = f"{attn_type}/{args.minference_prefill_backend}"
+    print(label, m, s / T)
     return s / T
+
+
+def get_attn_kwargs(attn_type: str):
+    if attn_type == "inf_llm":
+        return {"dense_decoding": False}
+    if attn_type == "minference":
+        return {"minference_prefill_backend": args.minference_prefill_backend}
+    return {}
+
+
+def get_attn_display_name(attn_type: str):
+    if attn_type == "minference":
+        if args.minference_prefill_backend == "auto":
+            return "MInference"
+        return f"MInference-{args.minference_prefill_backend}"
+    return {
+        "dense": "FlashAttention-2",
+        "a_shape": "A-Shape",
+        "inf_llm": "InfLLM",
+    }[attn_type]
 
 
 def run_benchmark(model_name: str):
     TARGET_LENS = [l * 1000 for l in [10, 50, 100, 200, 300, 500, 1000]]
     ATTN_TYPES = ["dense", "a_shape", "minference"]
-    ATTN_TYPES2NAME = {
-        "dense": "FlashAttention-2",
-        "a_shape": "A-Shape",
-        "inf_llm": "InfLLM",
-        "minference": "MInference",
-    }
     latency = defaultdict(list)
 
     for attn_type in ATTN_TYPES:
@@ -64,7 +81,7 @@ def run_benchmark(model_name: str):
             device_map="auto",
             _attn_implementation="flash_attention_2",
         )
-        attn_kwargs = {} if args.attn_type != "inf_llm" else {"dense_decoding": False}
+        attn_kwargs = get_attn_kwargs(attn_type)
         if attn_type != "hf":
             minference_patch = MInference(
                 attn_type, model_name, attn_kwargs=attn_kwargs
@@ -72,20 +89,25 @@ def run_benchmark(model_name: str):
             model = minference_patch(model)
         for l in TARGET_LENS:
             if l >= 700000 and attn_type not in ["inf_llm", "hf"]:
-                minference_patch = MInference(attn_type, model_name, kv_cache_cpu=True)
+                minference_patch = MInference(
+                    attn_type,
+                    model_name,
+                    kv_cache_cpu=True,
+                    attn_kwargs=get_attn_kwargs(attn_type),
+                )
                 model = minference_patch(model)
 
             t = run_target_length(l, model, attn_type)
-            latency[ATTN_TYPES2NAME[attn_type]].append([l, f"{t:.5f}"])
+            latency[get_attn_display_name(attn_type)].append([l, f"{t:.5f}"])
             print(attn_type, t, l)
             torch.cuda.empty_cache()
 
-    res = [[""] + [ATTN_TYPES2NAME[attn_type] for attn_type in ATTN_TYPES]]
+    res = [[""] + [get_attn_display_name(attn_type) for attn_type in ATTN_TYPES]]
     for idx in range(len(TARGET_LENS)):
         l = TARGET_LENS[idx]
         res.append(
             [f"{l//1000}K"]
-            + [latency[ATTN_TYPES2NAME[attn_type]][idx][-1] for attn_type in ATTN_TYPES]
+            + [latency[get_attn_display_name(attn_type)][idx][-1] for attn_type in ATTN_TYPES]
         )
     print("\n".join(["\t".join(ii) for ii in res]))
     with open("res.csv", "w") as f:
@@ -112,6 +134,12 @@ if __name__ == "__main__":
             "inf_llm",
         ],
     )
+    args.add_argument(
+        "--minference_prefill_backend",
+        type=str,
+        choices=["auto", "cutlass", "triton", "v5"],
+        default="auto",
+    )
     args.add_argument("--context_window", type=int, default=100_000)
     args.add_argument("--run_benchmark", action="store_true")
     args.add_argument("--kv_cache_cpu", action="store_true")
@@ -132,7 +160,7 @@ if __name__ == "__main__":
             trust_remote_code=args.trust_remote_code,
             _attn_implementation="flash_attention_2",
         )
-        attn_kwargs = {} if args.attn_type != "inf_llm" else {"dense_decoding": False}
+        attn_kwargs = get_attn_kwargs(args.attn_type)
         if args.attn_type != "hf":
             minference_patch = MInference(
                 args.attn_type,
