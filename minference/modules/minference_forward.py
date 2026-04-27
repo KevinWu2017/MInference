@@ -51,13 +51,22 @@ def _resolve_minference_prefill_backend(config):
     return config.get("minference_prefill_backend", config.get("prefill_backend", "auto"))
 
 
+def _resolve_minference_prefill_block_size(config):
+    if config is None:
+        return 64
+    return config.get("minference_prefill_block_size", config.get("prefill_block_size", 64))
+
+
 def _vertical_slash_attention(q, k, v, vertical_topk, slash, config=None):
+    block_size = _resolve_minference_prefill_block_size(config)
     return vertical_slash_sparse_attention(
         q,
         k,
         v,
         vertical_topk,
         slash,
+        block_size_M=block_size,
+        block_size_N=block_size,
         backend=_resolve_minference_prefill_backend(config),
     )
 

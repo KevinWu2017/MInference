@@ -215,10 +215,26 @@ def vertical_slash_sparse_attention(
         raise ValueError(f"Unsupported backend: {backend}")
     
     if (backend == "auto" or backend == "cutlass") and convert_vertical_slash_indexes_opt is not None:
-        return vertical_slash_sparse_attention_wo_pad(query, key, value, v_idx, s_idx)
+        return vertical_slash_sparse_attention_wo_pad(
+            query,
+            key,
+            value,
+            v_idx,
+            s_idx,
+            block_size_M=block_size_M,
+            block_size_N=block_size_N,
+        )
 
     if backend == "v5" and convert_vertical_slash_indexes_sparse is not None:
-        return vertical_slash_sparse_attention_wo_pad_v5(query, key, value, v_idx, s_idx)
+        return vertical_slash_sparse_attention_wo_pad_v5(
+            query,
+            key,
+            value,
+            v_idx,
+            s_idx,
+            block_size_M=block_size_M,
+            block_size_N=block_size_N,
+        )
 
     batch_size, num_heads, context_size, head_dim = query.shape
     pad = (block_size_M - context_size) & (block_size_M - 1)
@@ -276,6 +292,8 @@ def vertical_slash_sparse_attention_wo_pad(query, key, value, v_idx, s_idx, bloc
         block_offset,
         column_count,
         column_index,
+        block_size_M=block_size_M,
+        block_size_N=block_size_N,
         causal=True,
         return_softmax_lse=False,
     )
@@ -302,5 +320,9 @@ def vertical_slash_sparse_attention_wo_pad_v5(query, key, value, v_idx, s_idx, b
         sparse_block_offset,
         column_count,
         column_index,
+        block_size_M=block_size_M,
+        block_size_N=block_size_N,
+        causal=True,
+        return_softmax_lse=False,
     )
     return out.transpose(1, 2).contiguous()

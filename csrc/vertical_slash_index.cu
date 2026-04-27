@@ -124,6 +124,32 @@ void convert_vertical_slash_indexes_64x64(
     );
 }
 
+void convert_vertical_slash_indexes_32x32(
+    const int* seqlens,           // [BATCH, ]
+    const int* vertical_indexes,  // [BATCH, N_HEADS, NNZ_V]
+    const int* slash_indexes,     // [BATCH, N_HEADS, NNZ_S]
+    int* block_count,             // [BATCH, N_HEADS, cdiv(N_CTX, BLOCK_SIZE_M)]
+    int* block_offset,            // [BATCH, N_HEADS, cdiv(N_CTX, BLOCK_SIZE_M), NNZ_S]
+    int* column_count,            // [BATCH, N_HEADS, cdiv(N_CTX, BLOCK_SIZE_M)]
+    int* column_index,            // [BATCH, N_HEADS, cdiv(N_CTX, BLOCK_SIZE_M), NNZ_V]
+    int BATCH_SIZE,
+    int N_HEADS,
+    int N_ROWS,
+    int NNZ_V,
+    int NNZ_S
+) {
+    const int BLOCK_SIZE_M = 32;
+    const int BLOCK_SIZE_N = 32;
+    const int N_THREADS = 64;
+    const dim3 dimBlock(N_THREADS);
+    const dim3 dimGrid(N_HEADS, BATCH_SIZE, (N_ROWS + N_THREADS - 1) / N_THREADS);
+    convert_vertical_slash_indexes_kernel<<<dimGrid, dimBlock>>>(
+        seqlens, vertical_indexes, slash_indexes,
+        block_count, block_offset, column_count, column_index,
+        N_HEADS, N_ROWS, BLOCK_SIZE_M, BLOCK_SIZE_N, NNZ_V, NNZ_S
+    );
+}
+
 std::vector<at::Tensor> convert_vertical_slash_indexes(
     torch::Tensor seqlens,           // [BATCH, ]
     torch::Tensor vertical_indexes,  // [BATCH, N_HEADS, NNZ_V]
@@ -132,8 +158,8 @@ std::vector<at::Tensor> convert_vertical_slash_indexes(
     int block_size_M,
     int block_size_N
 ) {
-    assert(block_size_M == 64);
-    assert(block_size_N == 64);
+    assert(block_size_M == 64 || block_size_M == 32);
+    assert(block_size_N == 64 || block_size_N == 32);
 
     cudaSetDevice(seqlens.get_device());
 
@@ -148,7 +174,8 @@ std::vector<at::Tensor> convert_vertical_slash_indexes(
     torch::Tensor column_count = torch::zeros({batch_size, num_heads, num_rows}, seqlens.options());
     torch::Tensor column_index = torch::zeros({batch_size, num_heads, num_rows, nnz_vertical}, seqlens.options());
 
-    convert_vertical_slash_indexes_64x64(
+    if (block_size_M == 64 && block_size_N == 64) {
+        convert_vertical_slash_indexes_64x64(
         seqlens.data_ptr<int>(),
         vertical_indexes.data_ptr<int>(),
         slash_indexes.data_ptr<int>(),
@@ -161,7 +188,23 @@ std::vector<at::Tensor> convert_vertical_slash_indexes(
         num_rows,
         nnz_vertical,
         nnz_slash
-    );
+        );
+    } else if (block_size_M == 32 && block_size_N == 32) {
+        convert_vertical_slash_indexes_32x32(
+            seqlens.data_ptr<int>(),
+            vertical_indexes.data_ptr<int>(),
+            slash_indexes.data_ptr<int>(),
+            block_count.data_ptr<int>(),
+            block_offset.data_ptr<int>(),
+            column_count.data_ptr<int>(),
+            column_index.data_ptr<int>(),
+            batch_size,
+            num_heads,
+            num_rows,
+            nnz_vertical,
+            nnz_slash
+        );
+    }
 
     return { block_count, block_offset, column_count, column_index };
 }

@@ -53,7 +53,10 @@ def get_attn_kwargs(attn_type: str):
     if attn_type == "inf_llm":
         return {"dense_decoding": False}
     if attn_type == "minference":
-        return {"minference_prefill_backend": args.minference_prefill_backend}
+        return {
+            "minference_prefill_backend": args.minference_prefill_backend,
+            "minference_prefill_block_size": args.minference_prefill_block_size,
+        }
     return {}
 
 
@@ -139,6 +142,12 @@ if __name__ == "__main__":
         type=str,
         choices=["auto", "cutlass", "triton", "v5"],
         default="auto",
+    )
+    args.add_argument(
+        "--minference_prefill_block_size",
+        type=int,
+        default=64,
+        choices=[64, 32],
     )
     args.add_argument("--context_window", type=int, default=100_000)
     args.add_argument("--run_benchmark", action="store_true")
