@@ -213,9 +213,13 @@ def vertical_slash_sparse_attention(
 ):
     if backend not in {"auto", "cutlass", "triton", "v5"}:
         raise ValueError(f"Unsupported backend: {backend}")
-
-    if backend == "auto" and convert_vertical_slash_indexes_opt is not None:
+    
+    if (backend == "auto" or backend == "cutlass") and convert_vertical_slash_indexes_opt is not None:
         return vertical_slash_sparse_attention_wo_pad(query, key, value, v_idx, s_idx)
+
+    if backend == "v5" and convert_vertical_slash_indexes_sparse is not None:
+        return vertical_slash_sparse_attention_wo_pad_v5(query, key, value, v_idx, s_idx)
+
     batch_size, num_heads, context_size, head_dim = query.shape
     pad = (block_size_M - context_size) & (block_size_M - 1)
     query = torch.nn.functional.pad(query, [0, 0, 0, pad, 0, 0, 0, 0])
@@ -232,63 +236,16 @@ def vertical_slash_sparse_attention(
     s_idx = s_idx.to(torch.int32).reshape((batch_size, num_heads, -1)).sort(dim=-1, descending=True)[0]
     seqlens = torch.tensor([context_size], dtype=torch.int32, device=query.device)
     sm_scale = head_dim ** -0.5
-    if backend == "v5":
-        if sparse_attn_func_v5 is None or convert_vertical_slash_indexes_sparse is None:
-            raise RuntimeError("backend=v5 requires sgl-kernel sparse_attn_func_v5 support")
-        (
-            block_count,
-            block_offset,
-            sparse_block_count,
-            sparse_block_offset,
-            column_count,
-            column_index,
-        ) = convert_vertical_slash_indexes_sparse(
-            seqlens,
-            seqlens,
-            v_idx,
-            s_idx,
-            context_size,
-            block_size_M,
-            block_size_N,
-            causal=True,
-        )
-        out = sparse_attn_func_v5(
-            query.transpose(1, 2).contiguous(),
-            key.transpose(1, 2).contiguous(),
-            value.transpose(1, 2).contiguous(),
-            block_count,
-            block_offset,
-            sparse_block_count,
-            sparse_block_offset,
-            column_count,
-            column_index,
-            return_softmax_lse=False,
-            causal=True,
-            block_size_M=block_size_M,
-            block_size_N=block_size_N,
-        ).transpose(1, 2).contiguous()
-    else:
-        block_count, block_offset, column_count, column_index = convert_vertical_slash_indexes(
-            seqlens, v_idx, s_idx, context_size, block_size_M, block_size_N,
-        )
+    
+    block_count, block_offset, column_count, column_index = convert_vertical_slash_indexes(
+        seqlens, v_idx, s_idx, context_size, block_size_M, block_size_N,
+    )
 
-    if backend in {"auto", "cutlass"} and sparse_attn_func is not None and backend != "v5":
-        out = sparse_attn_func(
-            query.transpose(1, 2).contiguous(),
-            key.transpose(1, 2).contiguous(),
-            value.transpose(1, 2).contiguous(),
-            block_count, block_offset, column_count, column_index,
-            return_softmax_lse=False,
-            causal=True,
-        ).transpose(1, 2).contiguous()
-    elif backend != "v5":
-        if backend == "cutlass":
-            raise RuntimeError("backend=cutlass requires sparse_attn_func to be available")
-        out = _triton_mixed_sparse_attention(
-            query, key, value, seqlens,
-            block_count, block_offset, column_count, column_index,
-            sm_scale, block_size_M, block_size_N,
-        )
+    out = _triton_mixed_sparse_attention(
+        query, key, value, seqlens,
+        block_count, block_offset, column_count, column_index,
+        sm_scale, block_size_M, block_size_N,
+    )
 
     return out[..., :context_size, :head_dim]
 
@@ -321,5 +278,29 @@ def vertical_slash_sparse_attention_wo_pad(query, key, value, v_idx, s_idx, bloc
         column_index,
         causal=True,
         return_softmax_lse=False,
+    )
+    return out.transpose(1, 2).contiguous()
+
+def vertical_slash_sparse_attention_wo_pad_v5(query, key, value, v_idx, s_idx, block_size_M: int = 64, block_size_N: int = 64):
+    batch_size, num_heads, context_size, head_dim = query.shape
+    seqlens = torch.tensor([context_size], dtype=torch.int32, device=query.device)
+    
+    v_idx = v_idx.to(torch.int32).reshape((batch_size, num_heads, -1)).sort(dim=-1, descending=False)[0]
+    s_idx = s_idx.to(torch.int32).reshape((batch_size, num_heads, -1)).sort(dim=-1, descending=True)[0]
+    
+    block_count, block_offset, sparse_block_count, sparse_block_offset, column_count, column_index = convert_vertical_slash_indexes_sparse(
+        seqlens, seqlens, v_idx.to(torch.int32), s_idx.to(torch.int32), context_size, block_size_M, block_size_N, causal=True,
+    )
+
+    out = sparse_attn_func_v5(
+        query.transpose(1, 2).contiguous(),
+        key.transpose(1, 2).contiguous(),
+        value.transpose(1, 2).contiguous(),
+        block_count,
+        block_offset,
+        sparse_block_count,
+        sparse_block_offset,
+        column_count,
+        column_index,
     )
     return out.transpose(1, 2).contiguous()
