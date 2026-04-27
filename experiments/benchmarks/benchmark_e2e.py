@@ -44,7 +44,7 @@ def run_target_length(m: int, model, attn_type: str):
         s += time.time() - start
     label = attn_type
     if attn_type == "minference" and args.minference_prefill_backend != "auto":
-        label = f"{attn_type}/{args.minference_prefill_backend}"
+        label = f"{attn_type}/{args.minference_prefill_backend}/{args.minference_prefill_block_size}"
     print(label, m, s / T)
     return s / T
 
