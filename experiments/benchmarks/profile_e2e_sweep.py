@@ -13,12 +13,13 @@ from pathlib import Path
 from typing import Dict, List, Optional
 
 import torch
-from transformers import AutoModelForCausalLM, AutoTokenizer, GenerationConfig
+from transformers import AutoConfig, AutoModelForCausalLM, AutoTokenizer, GenerationConfig
 
 
 # DEFAULT_CONTEXT_WINDOWS = [l * 1000 for l in [10, 50, 100, 200, 300, 500, 1000]]
 DEFAULT_CONTEXT_WINDOWS = [l * 1000 for l in [10]]
-DEFAULT_METHODS = ["dense", "a_shape", "minference", "inf_llm", "flexprefill"]
+# DEFAULT_METHODS = ["flexprefill"]
+DEFAULT_METHODS = ["dense", "a_shape", "minference", "flexprefill"]
 DEFAULT_MINFERENCE_BACKENDS = ["triton", "cutlass", "v5"]
 DEFAULT_MINFERENCE_BLOCK_SIZES = [32, 64]
 
@@ -104,16 +105,47 @@ def make_inputs(tokenizer, prompt_tokens: List[int], context_window: int):
     return data["input_ids"].cuda(), data["attention_mask"].cuda()
 
 
+def zero_model_parameters(model) -> None:
+    with torch.no_grad():
+        for param in model.parameters():
+            param.zero_()
+        for buffer in model.buffers():
+            if buffer.is_floating_point() or buffer.is_complex():
+                buffer.zero_()
+
+
+def load_dummy_model(model_name: str, args):
+    from accelerate import init_empty_weights
+
+    config = AutoConfig.from_pretrained(
+        model_name,
+        trust_remote_code=args.trust_remote_code,
+    )
+    config._attn_implementation = "flash_attention_2"
+    with init_empty_weights():
+        model = AutoModelForCausalLM.from_config(
+            config,
+            torch_dtype=torch.bfloat16,
+            trust_remote_code=args.trust_remote_code,
+        )
+    model.to_empty(device=torch.device("cuda"))
+    zero_model_parameters(model)
+    return model
+
+
 def load_model(model_name: str, args, case: BenchmarkCase, kv_cache_cpu: bool):
     from minference import MInference
 
-    model = AutoModelForCausalLM.from_pretrained(
-        model_name,
-        torch_dtype="auto",
-        device_map="auto",
-        trust_remote_code=args.trust_remote_code,
-        _attn_implementation="flash_attention_2",
-    )
+    if args.dummy_weights:
+        model = load_dummy_model(model_name, args)
+    else:
+        model = AutoModelForCausalLM.from_pretrained(
+            model_name,
+            torch_dtype="auto",
+            device_map="auto",
+            trust_remote_code=args.trust_remote_code,
+            _attn_implementation="flash_attention_2",
+        )
     if case.attn_type != "hf":
         patch = MInference(
             case.attn_type,
@@ -271,6 +303,7 @@ def make_row(
         "context_window": context_window,
         "repeats": args.repeats,
         "warmup": args.warmup,
+        "dummy_weights": args.dummy_weights,
         "kv_cache_cpu": kv_cache_cpu,
         **result,
     }
@@ -309,6 +342,7 @@ def write_outputs(rows: List[Dict], output_prefix: Path):
         "context_window",
         "repeats",
         "warmup",
+        "dummy_weights",
         "kv_cache_cpu",
         "status",
         "mean_sec",
@@ -422,6 +456,11 @@ def main():
     parser.add_argument("--config_path", type=str, default=None)
     parser.add_argument("--repeats", type=int, default=10)
     parser.add_argument("--warmup", type=int, default=1)
+    parser.add_argument(
+        "--dummy_weights",
+        action="store_true",
+        help="Build the model from config with dummy weights instead of loading checkpoint weights.",
+    )
     parser.add_argument("--kv_cache_cpu", action="store_true")
     parser.add_argument(
         "--auto_kv_cache_cpu_threshold",
