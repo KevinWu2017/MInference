@@ -226,6 +226,13 @@ def huggingface_forward(forward):
     ):
         assert not output_attentions
 
+        if "num_heads" not in self.__dict__:
+            self.num_heads = self.config.num_attention_heads
+        if "num_key_value_heads" not in self.__dict__:
+            self.num_key_value_heads = self.config.num_key_value_heads
+        if "num_key_value_groups" not in self.__dict__:
+            self.num_key_value_groups = self.num_heads // self.num_key_value_heads
+
         # for GLM-4
         if "q_proj" not in self.__dict__["_modules"]:
             query_pos = self.num_heads * self.head_dim
@@ -797,7 +804,14 @@ def forward_llama_for_causal_lm(
     )
 
 
-def patch_glm_4_1m(model, config):
+def patch_glm_4_1m(model, config=None):
+    if model.__class__.__name__ != "ChatGLMForConditionalGeneration":
+        return model
+    if config is None:
+        raise ValueError(
+            "patch_glm_4_1m requires a MInferenceConfig for ChatGLM models."
+        )
+
     Attention = model.transformer.encoder.layers[0].self_attention.__class__
     Transformer = model.transformer.encoder.__class__
 
@@ -1459,7 +1473,13 @@ def patch_hf(
     else:
         raise ValueError("Only supports llama, mistral and qwen2 models.")
 
-    hf_rope = model.model.layers[0].self_attn.rotary_emb
+    hf_rope = getattr(
+        model.model,
+        "rotary_emb",
+        getattr(model.model.layers[0].self_attn, "rotary_emb", None),
+    )
+    if hf_rope is None:
+        raise AttributeError("Could not find rotary_emb on model or attention layer.")
     base = (
         base
         if base is not None

@@ -1162,6 +1162,10 @@ class GreedySearch:
     def clear(self):
         self.past_kv = None
 
+    def eval(self):
+        self.model.eval()
+        return self
+
     def _process_texts(self, input_text):
         model_inputs = {}
         input_ids = self.tokenizer.encode(input_text)
@@ -1285,6 +1289,7 @@ class InfLLMGenerator(GreedySearch):
         generation_config=None,
         pad_token_id=None,
         max_new_tokens=None,
+        **kwargs,
     ):
         if max_new_tokens is not None:
             max_new_tokens = max_new_tokens
