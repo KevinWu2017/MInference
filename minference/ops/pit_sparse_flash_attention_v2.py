@@ -11,32 +11,34 @@ from ..cuda import convert_vertical_slash_indexes
 
 try:
     from sgl_kernel.sparse_flash_attn import (
-        convert_vertical_slash_indexes_sparse,
         sparse_attn_func,
-        sparse_attn_func_v5,
     )
-except:
+except ImportError:
     try:
         from vllm_flash_attn import sparse_attn_func
-
-        convert_vertical_slash_indexes_sparse = None
-        sparse_attn_func_v5 = None
-    except:
+    except ImportError:
         print("To benefit from fast kernel implementations, we recommend installing SGLang or vllm.")
-        convert_vertical_slash_indexes_sparse = None
         sparse_attn_func = None
-        sparse_attn_func_v5 = None
+
+try:
+    from sgl_kernel.sparse_flash_attn import (
+        convert_vertical_slash_indexes_sparse,
+        sparse_attn_func_sptc,
+    )
+except ImportError:
+    convert_vertical_slash_indexes_sparse = None
+    sparse_attn_func_sptc = None
 
 try:
     from sgl_kernel.sparse_flash_attn import (
         convert_vertical_slash_indexes as convert_vertical_slash_indexes_opt,
     )
-except:
+except ImportError:
     try:
         from vllm._custom_ops import (
             convert_vertical_slash_indexes as convert_vertical_slash_indexes_opt,
         )
-    except:
+    except ImportError:
         convert_vertical_slash_indexes_opt = None
 
 # @triton.autotune(
@@ -356,7 +358,7 @@ def vertical_slash_sparse_attention(
     block_size_N: int = 64,
     backend: str = "auto",
 ):
-    if backend not in {"auto", "cutlass", "triton", "v5"}:
+    if backend not in {"auto", "cutlass", "triton", "sptc"}:
         raise ValueError(f"Unsupported backend: {backend}")
     
     if (backend == "auto" or backend == "cutlass") and convert_vertical_slash_indexes_opt is not None:
@@ -370,8 +372,10 @@ def vertical_slash_sparse_attention(
             block_size_N=block_size_N,
         )
 
-    if backend == "v5" and convert_vertical_slash_indexes_sparse is not None:
-        return vertical_slash_sparse_attention_wo_pad_v5(
+    if backend == "sptc":
+        if convert_vertical_slash_indexes_sparse is None or sparse_attn_func_sptc is None:
+            raise RuntimeError("SPTC requires a local sgl_kernel build with the SPTC operator")
+        return vertical_slash_sparse_attention_wo_pad_sptc(
             query,
             key,
             value,
@@ -444,7 +448,7 @@ def vertical_slash_sparse_attention_wo_pad(query, key, value, v_idx, s_idx, bloc
     )
     return out.transpose(1, 2).contiguous()
 
-def vertical_slash_sparse_attention_wo_pad_v5(query, key, value, v_idx, s_idx, block_size_M: int = 64, block_size_N: int = 64):
+def vertical_slash_sparse_attention_wo_pad_sptc(query, key, value, v_idx, s_idx, block_size_M: int = 64, block_size_N: int = 64):
     batch_size, num_heads, context_size, head_dim = query.shape
     seqlens = torch.tensor([context_size], dtype=torch.int32, device=query.device)
     
@@ -455,7 +459,7 @@ def vertical_slash_sparse_attention_wo_pad_v5(query, key, value, v_idx, s_idx, b
         seqlens, seqlens, v_idx.to(torch.int32), s_idx.to(torch.int32), context_size, block_size_M, block_size_N, causal=True,
     )
 
-    out = sparse_attn_func_v5(
+    out = sparse_attn_func_sptc(
         query.transpose(1, 2).contiguous(),
         key.transpose(1, 2).contiguous(),
         value.transpose(1, 2).contiguous(),
